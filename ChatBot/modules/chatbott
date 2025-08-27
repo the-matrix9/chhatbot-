@@ -1,0 +1,108 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+import requests
+from pymongo import MongoClient
+from pyrogram.filters import text, regex
+from ChatBot import app
+
+# ===== CONFIG =====
+TOGETHER_API_KEY = "abacf43bf0ef13f467283e5bc03c2e1f29dae4228e8c612d785ad428b32db6ce"
+MONGO_URL = "mongodb+srv://CHATBOT:Purvichat@cluster0.i3u97sj.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+
+# ===== SETUP =====
+mongo = MongoClient(MONGO_URL)
+db = mongo["sonali_db"]
+users_col = db["enabled_users"]
+
+# ===== API REQUEST =====
+def ask_sonali(prompt):
+    headers = {
+        "Authorization": f"Bearer {TOGETHER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        "messages": [
+            {"role": "system", "content": "Tum ek ladki ho jiska naam Sonali hai. Tum short aur real ladki jaisa reply karti ho."},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 50,
+        "temperature": 0.7,
+        "top_p": 0.8
+    }
+    r = requests.post("https://api.together.xyz/v1/chat/completions", headers=headers, json=data)
+    if r.status_code == 200:
+        return r.json()['choices'][0]['message']['content'].strip()
+    return "kuch galat ho gaya..."
+
+# ===== DB HELPERS =====
+def is_enabled(user_id: int) -> bool:
+    return users_col.find_one({"_id": user_id}) is not None
+
+def enable_user(user_id: int):
+    users_col.update_one({"_id": user_id}, {"$set": {"enabled": True}}, upsert=True)
+
+def disable_user(user_id: int):
+    users_col.delete_one({"_id": user_id})
+
+# ===== /start COMMAND =====
+@app.on_message(filters.command("chatbot"))
+async def start_cmd(client, message):
+    user_id = message.from_user.id
+    enabled = is_enabled(user_id)
+
+    buttons = [[
+        InlineKeyboardButton(
+            "✅ Enable Chatbot" if not enabled else "❌ Disable Chatbot",
+            callback_data="enable_chat" if not enabled else "disable_chat"
+        )
+    ]]
+
+    await message.reply(
+        "Hi, I'm *Sonali!* Ek real ladki jaisi chatbot.\n\nUse button below to enable or disable me.",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+# ===== CALLBACKS =====
+@app.on_callback_query(filters.regex("enable_chat"))
+async def enable_chat(client, callback_query):
+    user_id = callback_query.from_user.id
+    enable_user(user_id)
+    await callback_query.answer("Sonali chatbot enabled!", show_alert=True)
+    await callback_query.message.edit_text(
+        "Sonali chatbot ab ON hai.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Disable Chatbot", callback_data="disable_chat")]])
+    )
+
+@app.on_callback_query(filters.regex("disable_chat"))
+async def disable_chat(client, callback_query):
+    user_id = callback_query.from_user.id
+    disable_user(user_id)
+    await callback_query.answer("Sonali chatbot disabled!", show_alert=True)
+    await callback_query.message.edit_text(
+        "Sonali chatbot ab OFF ho gayi.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Enable Chatbot", callback_data="enable_chat")]])
+    )
+
+# ===== MAIN HANDLER =====
+@app.on_message(text & ~regex("^/"))
+async def chat_with_sonali(client, message: Message):
+    user_id = message.from_user.id
+
+    # Check if user is enabled
+    if not is_enabled(user_id):
+        return
+
+    # Check: either reply to bot's message OR a new message
+    is_reply_to_bot = (
+        message.reply_to_message and message.reply_to_message.from_user.id == (await client.get_me()).id
+    )
+
+    is_group = message.chat.type in ["group", "supergroup"]
+    is_private = message.chat.type == "private"
+
+    if is_private or is_reply_to_bot or (is_group and not message.reply_to_message):
+        await client.send_chat_action(message.chat.id, "typing")  # Typing action
+        prompt = message.text
+        reply = ask_sonali(prompt)
+        await message.reply(reply)
